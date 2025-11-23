@@ -34,6 +34,7 @@ from fastapi import FastAPI, Body
 from fastapi.responses import StreamingResponse
 
 import re
+from prettyformatter import pprint
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 Chinese_matplot_str = """
@@ -47,11 +48,13 @@ def execute_code(code_str):
     import contextlib
     import traceback
 
+    print(";; fn-execute_code")
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
     try:
-        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(
-            stderr_capture
+        with (
+            contextlib.redirect_stdout(stdout_capture),
+            contextlib.redirect_stderr(stderr_capture),
         ):
             exec(code_str, {})
         output = stdout_capture.getvalue()
@@ -73,7 +76,7 @@ def execute_code(code_str):
         error_message = f"Traceback (most recent call last):\n"
         if error_line is not None and 1 <= error_line <= len(code_lines):
             error_message += f'  File "<string>", line {error_line}, in <module>\n'
-            error_message += f"    {code_lines[error_line-1].strip()}\n"
+            error_message += f"    {code_lines[error_line - 1].strip()}\n"
         error_message += f"{type(exec_error).__name__}: {str(exec_error)}"
         if stderr_capture.getvalue():
             error_message += f"\n{stderr_capture.getvalue()}"
@@ -89,6 +92,7 @@ def execute_code_safe(
     exec_cwd = os.path.abspath(workspace_dir)
     os.makedirs(exec_cwd, exist_ok=True)
     tmp_path = None
+    print(";; fn-execute_code_safe", exec_cwd)
     try:
         fd, tmp_path = tempfile.mkstemp(suffix=".py", dir=exec_cwd)
         os.close(fd)
@@ -100,6 +104,7 @@ def execute_code_safe(
         child_env.setdefault("QT_QPA_PLATFORM", "offscreen")
         child_env.pop("DISPLAY", None)
 
+        print(";; running-code ", exec_cwd, tmp_path, sys.executable)
         completed = subprocess.run(
             [sys.executable, tmp_path],
             cwd=exec_cwd,
@@ -118,14 +123,16 @@ def execute_code_safe(
         try:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
+                print(";; code-running-done-rm-files ", tmp_path)
         except Exception:
             pass
 
 
 # API endpoint and model path
 API_BASE = "http://localhost:8000/v1"  # this localhost is for vllm api, do not change
-MODEL_PATH = "DeepAnalyze-8B"  # replace to your path to DeepAnalyze-8B
-
+# MODEL_PATH = "DeepAnalyze-8B"  # replace to your path to DeepAnalyze-8B
+MODEL_PATH = "RUC-DataLab/DeepAnalyze-8B"
+# MODEL_PATH = "qwen/qwen3-vl-30b"
 
 # Initialize OpenAI client
 client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
@@ -156,7 +163,7 @@ def build_download_url(rel_path: str) -> str:
 
 
 # FastAPI app
-app = FastAPI()
+app = FastAPI(debug=True)
 
 # Add CORS middleware
 app.add_middleware(
@@ -249,21 +256,22 @@ def uniquify_path(target: Path) -> Path:
         i += 1
 
 
-def execute_code(code_str):
-    """执行Python代码"""
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(
-            stderr_capture
-        ):
-            exec(code_str, {})
-        output = stdout_capture.getvalue()
-        if stderr_capture.getvalue():
-            output += stderr_capture.getvalue()
-        return output
-    except Exception as exec_error:
-        return f"[Error]: {str(exec_error)}"
+# def execute_code(code_str):
+#     """执行Python代码"""
+#     stdout_capture = io.StringIO()
+#     stderr_capture = io.StringIO()
+#     try:
+#         with (
+#             contextlib.redirect_stdout(stdout_capture),
+#             contextlib.redirect_stderr(stderr_capture),
+#         ):
+#             exec(code_str, {})
+#         output = stdout_capture.getvalue()
+#         if stderr_capture.getvalue():
+#             output += stderr_capture.getvalue()
+#         return output
+#     except Exception as exec_error:
+#         return f"[Error]: {str(exec_error)}"
 
 
 # API Routes
@@ -654,17 +662,18 @@ def bot_stream(messages, workspace, session_id="default"):
             else collect_file_info(WORKSPACE_DIR)
         )
         if file_info:
-            messages[-1][
-                "content"
-            ] = f"# Instruction\n{user_message}\n\n# Data\n{file_info}"
+            messages[-1]["content"] = (
+                f"# Instruction\n{user_message}\n\n# Data\n{file_info}"
+            )
         else:
             messages[-1]["content"] = f"# Instruction\n{user_message}"
-    # print("111",messages)
+    print(";; chat-prompt ", messages[-1]["content"])
     initial_workspace = set(workspace)
     assistant_reply = ""
     finished = False
     exe_output = None
     while not finished:
+        print(f';; DEBUG: Starting new iteration, finished={finished}')
         response = client.chat.completions.create(
             model=MODEL_PATH,
             messages=messages,
@@ -684,15 +693,20 @@ def bot_stream(messages, workspace, session_id="default"):
                 assistant_reply += delta
                 yield delta
             if "</Answer>" in cur_res:
+                print(';; DEBUG: </Answer> found, setting finished=True')
+                print(f';; DEBUG: Full response when </Answer> found: {cur_res[-300:]}')
                 finished = True
                 break
+        print(f';; DEBUG: After chunk loop - finished={finished}, cur_res contains </Code>={"</Code>" in cur_res}')
         if chunk.choices[0].finish_reason == "stop" and not finished:
+            print(';; DEBUG: finish_reason=stop, adding </Code> if missing')
             if not cur_res.endswith("</Code>"):
                 missing_tag = "</Code>"
                 cur_res += missing_tag
                 assistant_reply += missing_tag
                 yield missing_tag
         if "</Code>" in cur_res and not finished:
+            print(';; </Code> in response ')
             messages.append({"role": "assistant", "content": cur_res})
             code_match = re.search(r"<Code>(.*?)</Code>", cur_res, re.DOTALL)
             if code_match:
@@ -707,9 +721,12 @@ def bot_stream(messages, workspace, session_id="default"):
                         for p in Path(WORKSPACE_DIR).rglob("*")
                         if p.is_file()
                     }
+                    print(";; before_state 1️⃣")
+                    pprint(before_state, json=True)
                 except Exception:
                     before_state = {}
                 # 在子进程中以固定工作区执行
+                print(";; exec-code ", WORKSPACE_DIR, cur_res)
                 exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
                 # 执行后快照
                 try:
@@ -718,6 +735,8 @@ def bot_stream(messages, workspace, session_id="default"):
                         for p in Path(WORKSPACE_DIR).rglob("*")
                         if p.is_file()
                     }
+                    print(";; after_state 2️⃣")
+                    pprint(after_state, json=True)
                 except Exception:
                     after_state = {}
                 # 计算新增与修改
@@ -727,6 +746,9 @@ def bot_stream(messages, workspace, session_id="default"):
                     for p in after_state.keys()
                     if p in before_state and after_state[p] != before_state[p]
                 ]
+                print(";; added/modified 3️⃣")
+                pprint(added_paths, json=True)
+                pprint(modified_paths, json=True)
 
                 # 将新增和修改的文件移动到 generated 文件夹
                 artifact_paths = []
@@ -992,6 +1014,7 @@ async def export_report(body: dict = Body(...)):
     except HTTPException:
         raise
     except Exception as e:
+        print(';; export-err ', str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -999,4 +1022,4 @@ if __name__ == "__main__":
     print("🚀 启动后端服务...")
     print(f"   - API服务: http://localhost:8200")
     print(f"   - 文件服务: http://localhost:8100")
-    uvicorn.run(app, host="0.0.0.0", port=8200)
+    uvicorn.run(app, host="0.0.0.0", port=8200, log_level="debug", access_log=True)
